@@ -47,6 +47,7 @@ struct Column_ref : Ast_base {
  * @brief Table reference with optional alias
  */
 struct Table_ref : Ast_base {
+  std::optional<std::string> m_schema_name;
   std::string m_table_name;
   std::optional<std::string> m_alias;
 };
@@ -78,21 +79,21 @@ struct Join : Ast_base {
  */
 struct Binary_op : Ast_base {
   enum class Op_type {
-    eq,        // =
-    neq,       // <>
-    lt,        // <
-    gt,        // >
-    lte,       // <=
-    gte,       // >=
-    add,       // +
-    subtract,  // -
-    multiply,  // *
-    divide,    // /
-    mod,       // %
-    and_,      // AND
-    or_,       // OR
-    like,      // LIKE
-    in_        // IN
+    EQ,        // =
+    NEQ,       // <>
+    LT,        // <
+    GT,        // >
+    LTE,       // <=
+    GTE,       // >=
+    ADD,       // +
+    SUBTRACT,  // -
+    MULTIPLY,  // *
+    DIVIDE,    // /
+    MOD,       // %
+    AND,       // AND
+    OR,        // OR
+    LIKE,      // LIKE
+    IN         // IN
   };
 
   Op_type m_op;
@@ -105,10 +106,10 @@ struct Binary_op : Ast_base {
  */
 struct Unary_op : Ast_base {
   enum class Op_type {
-    not_,
-    exists,
-    is_null,
-    is_not_null
+    NOT,
+    EXISTS,
+    IS_NULL,
+    IS_NOT_NULL
   };
 
   Op_type m_op;
@@ -152,6 +153,10 @@ struct Case_expr : Ast_base {
  */
 struct Where_clause : Ast_base {
   std::unique_ptr<Ast_base> m_condition;
+
+  [[nodiscard]] bool has_value() const noexcept {
+    return m_condition != nullptr;
+  }
 };
 
 /**
@@ -297,6 +302,40 @@ struct Alter_table_stmt : Ast_base {
   >;
 
   Alteration  m_alteration{std::in_place_type<Rename_table>, ""};
+
+  /* If exists specified */
+  bool m_if_exists{false};
+
+  /* If all inheritance specified */
+  bool m_all_inheritance{false};
+
+  /* If only specified */
+  bool m_only{false}; 
+};
+
+/**
+ * @brief Base class for all ALTER statement types (more generic).
+ */
+struct Alter_stmt : Ast_base {
+  enum class Object_type {
+    table,
+    index,
+    view,
+    sequence,
+    trigger,
+    procedure,
+    function,
+    database
+  };
+
+  Object_type m_object_type;
+  bool m_if_exists{false};
+  
+  /* The actual definition is stored in one of these */
+  std::variant<
+    // FIXME: std::unique_ptr<Alter_view_stmt>,
+    std::unique_ptr<Alter_table_stmt>
+  > m_definition;
 };
 
 /**
@@ -408,7 +447,7 @@ struct Create_trigger_stmt : Ast_base {
 struct Create_routine_stmt : Ast_base {
   struct Parameter {
     enum class Mode {
-      in_,
+      sql_in,
       out,
       inout
     };
@@ -889,7 +928,7 @@ struct Create_trigger_def : Ast_base {
  */
 struct Parameter_def : Ast_base {
   enum class Direction {
-    in_,
+    sql_in,
     out,
     inout
   };
@@ -1169,5 +1208,20 @@ struct Function_call : Ast_base {
   std::unique_ptr<Window_spec> m_window;
 };
 
+  struct Column_reference {
+    std::optional<std::string> m_schema;
+    std::optional<std::string> m_table;
+    std::string m_column;
+    bool m_ascending{true};
+    enum class Nulls_position {
+      DEFAULT,
+      FIRST,
+      LAST
+    } m_nulls_position{Nulls_position::DEFAULT};
+    /* For index prefix lengths   */
+    std::optional<size_t> m_length;  
+    /* For collations */
+    std::optional<std::string> m_collation;
+  };
 
 } // namespace sql

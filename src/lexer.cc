@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <cassert>
+#include <iostream>
 #include <unordered_set>
 
 #include "sql/lexer.h"
@@ -5,68 +8,83 @@
 namespace sql {
 
 Lexer::Lexer(std::string_view input) 
-  : m_pos(), m_line(1), m_column(1), m_input(input) {}
+  : m_pos(), m_line(1), m_col(1), m_input(input) {}
 
 Token Lexer::lex_identifier() {
-  size_t start_pos = m_pos;
-  size_t start_column = m_column;
+  const auto start_pos{m_pos};
+  const auto start_col{m_col};
 
   while (m_pos < m_input.size() && (std::isalnum(m_input[m_pos]) || m_input[m_pos] == '_')) {
     ++m_pos;
-    ++m_column;
+    ++m_col;
   }
 
-  std::string value(m_input.substr(start_pos, m_pos - start_pos));
+  const std::string value(m_input.substr(start_pos, m_pos - start_pos));
 
+  // TODO: Add more keywords
   static const std::unordered_set<std::string> keywords = {
-    "SELECT", "FROM", "WHERE", "GROUP", "BY", "HAVING", "ORDER", "LIMIT",
-    "INSERT", "UPDATE", "DELETE", "AND", "OR", "NOT", "NULL", "TRUE",
-    "FALSE"
+    "SELECT", "FROM", "WHERE", "GROUP", "BY", "HAVING", "ORDER", "LIMIT", "INSERT", "UPDATE", "DELETE", "AND",
+    "OR", "NOT", "NULL", "TRUE", "FALSE", "AS", "ON", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "OUTER",
+    "JOIN", "ON", "USING", "DISTINCT", "ORDER", "BY", "ASC", "DESC", "LIMIT", "OFFSET", "FETCH", "NEXT",
+    "FIRST", "LAST", "ONLY", "WITH", "RECURSIVE", "WITHOUT", "ROW", "ROWS", "SET", "HAVING", "LIKE", "GROUP"
   };
 
-  Lexeme_type type = keywords.contains(value) ? Lexeme_type::keyword : Lexeme_type::identifier;
+  std::string ucase{value};
+  std::transform(ucase.begin(), ucase.end(), ucase.begin(), ::toupper);
+  Lexeme_type type = keywords.contains(ucase) ? Lexeme_type::KEYWORD : Lexeme_type::IDENTIFIER;
 
-  co_return Lexeme{type, value, m_line, start_column};
+  co_return Lexeme{type, value, m_line, start_col};
 }
 
 Token Lexer::lex_number() {
-  size_t start_pos = m_pos;
-  size_t start_column = m_column;
-  bool has_decimal = false;
+  bool has_decimal{};
+  const auto start_pos{m_pos};
+  const auto start_col{m_col};
 
   while (m_pos < m_input.size()) {
     if (m_input[m_pos] == '.' && !has_decimal) {
       has_decimal = true;
       ++m_pos;
-      ++m_column;
+      ++m_col;
     } else if (std::isdigit(m_input[m_pos])) {
       ++m_pos;
-      ++m_column;
+      ++m_col;
     } else {
       break;
     }
   }
 
-  co_return Lexeme{Lexeme_type::number, std::string(m_input.substr(start_pos, m_pos - start_pos)), m_line, start_column};
+  co_return Lexeme{Lexeme_type::NUMBER, std::string(m_input.substr(start_pos, m_pos - start_pos)), m_line, start_col};
 }
 
 Token Lexer::lex_string() {
-  std::string value;
+  assert(m_input[m_pos] == '\'');
 
   /* Skip opening quote */
   ++m_pos;
 
-  size_t start_column = m_column++;
+  std::string value{};
+  const auto start_col{m_col};
 
-  while (m_pos < m_input.size() && m_input[m_pos] != '\'') {
+  value.reserve(32);
+
+  while (m_pos < m_input.size()) {
     if (m_input[m_pos] == '\\' && m_pos + 1 < m_input.size()) {
-      value += m_input[m_pos + 1];
+      /* Handle escape sequence */
+      value.push_back(m_input[m_pos + 1]);
       m_pos += 2;
-      m_column += 2;
+      m_col += 2;
+    } else if (m_input[m_pos] == '\'' && m_pos + 1 < m_input.size() && m_input[m_pos + 1] == '\'') {
+      /* Handle SQL single quote escape */
+      value.push_back('\'');
+      m_pos += 2;
+      m_col += 2;
+    } else if (m_input[m_pos] == '\'') {
+      break;
     } else {
-      value += m_input[m_pos];
+      value.push_back(m_input[m_pos]);
       ++m_pos;
-      ++m_column;
+      ++m_col;
     }
   }
 
@@ -74,30 +92,32 @@ Token Lexer::lex_string() {
     throw std::runtime_error("Unterminated string literal");
   }
 
+  assert(m_input[m_pos] == '\'');
+
   /* Skip closing quote */
   ++m_pos;
-  ++m_column;
+  ++m_col;
 
-  co_return Lexeme{Lexeme_type::string_literal, value, m_line, start_column};
+  co_return Lexeme{Lexeme_type::STRING_LITERAL, value, m_line, start_col};
 }
 
 Token Lexer::lex_operator() {
-  size_t start_column = m_column;
+  size_t start_col = m_col;
   char c = m_input[m_pos++];
 
-  ++m_column;
+  ++m_col;
 
   /* Handle multi-character operators */
   if (m_pos < m_input.size()) {
     std::string op{c, m_input[m_pos]};
     if (op == "<=" || op == ">=" || op == "!=" || op == "<>") {
       ++m_pos;
-      ++m_column;
-      co_return Lexeme{Lexeme_type::operator_, op, m_line, start_column};
+      ++m_col;
+      co_return Lexeme{Lexeme_type::OPERATOR, op, m_line, start_col};
     }
   }
 
-  co_return Lexeme{Lexeme_type::operator_, std::string(1, c), m_line, start_column };
+  co_return Lexeme{Lexeme_type::OPERATOR, std::string(1, c), m_line, start_col};
 }
 
 } // namespace sql

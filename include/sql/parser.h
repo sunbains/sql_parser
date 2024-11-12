@@ -19,61 +19,84 @@
 namespace sql {
 
 using Ast_node = std::variant<
-  Alter_table_stmt,
-  Column_ref,
-  Create_table_stmt,
-  Create_trigger_stmt,
-  Create_view_stmt,
-  Drop_stmt,
-  Grant_revoke_stmt,
-  Merge_stmt,
-  Select_stmt,
-  Truncate_stmt,
-  Where_clause,
-  Insert_stmt,
-  Update_stmt,
-  Delete_stmt,
-  Create_stmt
+  std::unique_ptr<Alter_stmt>,
+  std::unique_ptr<Column_ref>,
+  std::unique_ptr<Create_table_stmt>,
+  std::unique_ptr<Create_trigger_stmt>,
+  std::unique_ptr<Create_view_stmt>,
+  std::unique_ptr<Drop_stmt>,
+  std::unique_ptr<Grant_revoke_stmt>,
+  std::unique_ptr<Merge_stmt>,
+  std::unique_ptr<Select_stmt>,
+  std::unique_ptr<Truncate_stmt>,
+  std::unique_ptr<Where_clause>,
+  std::unique_ptr<Insert_stmt>,
+  std::unique_ptr<Update_stmt>,
+  std::unique_ptr<Delete_stmt>,
+  std::unique_ptr<Create_stmt>
   >;
 
 /**
- * @brief SQL Parser that builds an AST
+ * @brief A top down LLA SQL Parser that builds an AST
  */
 struct Parser {
   /**
    * @brief Constructs parser with a lexer
    * @param[in] lexer Lexer to use for tokens
    */
-  explicit Parser(Lexer& lexer) : m_lexer(lexer) {}
+  explicit Parser(Lexer& lexer) : m_lexer(lexer) {
+    m_state_stack.push_back({m_lexer.m_pos, Lexeme{}, Lexeme{}, 1, 1 });
+
+    /* Get the first token */
+    advance();
+  }
+
+  ~Parser() {
+    assert(m_state_stack.size() == 1);
+  }
 
   /**
-   * @brief Parses SQL into AST
+   * @brief Parses SQL into an AST
    * 
-   * @return Root node of AST
+   * @return Root node of the AST
    */
-  [[nodiscard]] std::unique_ptr<Ast_node> parse();
+  [[nodiscard]] Ast_node parse();
 
 private:
   void advance() {
-    m_lexeme = m_lexer.next_token().get_lexeme();
+    m_lexer.skip_whitespace();
+
+    auto &state = m_state_stack.back();
+    state.m_prev_lexeme = std::move(state.m_lexeme);
+    state.m_lexeme = std::move(m_lexer.next_token().get_lexeme());
   }
 
   void expect(Lexeme_type type) {
-    if (m_lexeme.m_type != type) [[unlikely]] {
-      throw std::runtime_error("Unexpected token type");
+    const auto &state = m_state_stack.back();
+    if (state.m_lexeme.m_type != type) [[unlikely]] {
+      throw std::runtime_error(
+        std::format("Unexpected token type: expected token {}, got {}, previous token '{}', current token '{}, m_pos {}\n{}'",
+          sql::to_string(type),
+          sql::to_string(state.m_lexeme.m_type),
+          state.m_prev_lexeme.m_value,
+          state.m_lexeme.m_value,
+          state.m_pos,
+          m_lexer.m_input.substr(state.m_col)));
     }
     advance();
   }
 
   void expect(Lexeme_type type, const std::string& value) {
-    if (m_lexeme.m_type != type || m_lexeme.m_value != value) [[unlikely]] {
+    const auto &state = m_state_stack.back();
+    if (state.m_lexeme.m_type != type || state.m_lexeme.m_value != value) [[unlikely]] {
       throw std::runtime_error("Unexpected token");
     }
     advance();
   }
 
   [[nodiscard]] bool match(Lexeme_type type) {
-    if (m_lexeme.m_type == type) [[likely]] {
+    const auto &state = m_state_stack.back();
+    if (state.m_lexeme.m_type == type) [[likely]] {
       advance();
       return true;
     } else {
@@ -81,30 +104,25 @@ private:
     }
   }
 
+  /**
+   * @brief Matches a token with a given type and value
+   * 
+   * If there is a match, the lexer advances to the next token
+   * 
+   * @param[in] type Token type
+   * @param[in] value Token value
+   * 
+   * @return True if the token matches, false otherwise
+   */
   [[nodiscard]] bool match(Lexeme_type type, const std::string& value) {
-    if (m_lexeme.m_type == type && m_lexeme.m_value == value) [[likely]] {
+    const auto &state = m_state_stack.back();
+    if (state.m_lexeme.m_type == type && state.m_lexeme.m_value == value) [[likely]] {
       advance();
       return true;
     } else {
       return false;
     }
   }
-
-  struct Column_reference {
-    std::optional<std::string> m_schema;
-    std::optional<std::string> m_table;
-    std::string m_column;
-    bool m_ascending{true};
-    enum class Nulls_position {
-        default_,
-        first,
-        last
-    } m_nulls_position{Nulls_position::default_};
-    /* For index prefix lengths   */
-    std::optional<size_t> m_length;  
-    /* For collations */
-    std::optional<std::string> m_collation;
-  };
 
   /* Token lookahead
    *
@@ -113,9 +131,11 @@ private:
    * @return Lexeme at offset
    */
   [[nodiscard]] Lexeme peek(size_t offset) {
+    auto &state = m_state_stack.back();
+
     /* Store current position */
     auto saved_pos = m_lexer.m_pos;
-    auto saved_token = m_lexeme;
+    auto saved_lexeme = state.m_lexeme;
 
     /* Advance to desired position */
     for (size_t i{}; i < offset; ++i) {
@@ -123,13 +143,18 @@ private:
     }
 
     /* Get the token at that position */
-    Lexeme result = m_lexeme;
+    Lexeme result = state.m_lexeme;
 
     /* Restore original position */
     m_lexer.m_pos = saved_pos;
-    m_lexeme = saved_token;
+    state.m_lexeme = saved_lexeme;
 
     return result;
+  }
+
+  [[nodiscard]] bool match_but_dont_advance(Lexeme_type type, const std::string& value) {
+    const auto state = m_state_stack.back();
+    return state.m_lexeme.m_type == type && state.m_lexeme.m_value == value;
   }
 
   [[nodiscard]] Lexeme peek() {
@@ -142,12 +167,13 @@ private:
   }
 
   [[nodiscard]] bool is_whitespace_before(const Lexeme& lexeme) const {
-    return lexeme.m_column > m_previous_lexeme.m_column + m_previous_lexeme.m_value.length();
+    auto &state = m_state_stack.back();
+    return lexeme.m_col > state.m_col + state.m_lexeme.m_value.length();
   }
 
   [[nodiscard]] bool peek_is_operator(const std::string& op) {
     Lexeme next = peek();
-    return next.m_type == Lexeme_type::operator_ && next.m_value == op;
+    return next.m_type == Lexeme_type::OPERATOR && next.m_value == op;
   }
 
   /**
@@ -155,33 +181,29 @@ private:
    * @return State identifier that can be used to restore this state
    */
   size_t save_state() {
+    assert(!m_state_stack.empty());
+    auto &state = m_state_stack.back();
+
     m_state_stack.push_back({
-      m_position,
-      m_current_token,
-      m_previous_token,
-      m_line,
-      m_column
+      state.m_pos,
+      state.m_lexeme,
+      state.m_prev_lexeme,
+      state.m_line,
+      state.m_col
     });
     return m_state_stack.size() - 1;
   }
 
   /**
    * @brief Restores parser state to a previously saved state
-   * @param state_id The state identifier returned by save_state
+   * 
+   * @param[in] state_id The state identifier returned by save_state
    */
   void restore_state(size_t state_id) {
     if (state_id >= m_state_stack.size()) [[unlikely]] {
-      throw std::runtime_error("Invalid parser state ID");
+      throw std::runtime_error("Invalid parser state ID: " + std::to_string(state_id));
     }
 
-    const auto& state = m_state_stack[state_id];
-
-    m_position = state.m_position;
-    m_current_token = state.m_current_token;
-    m_previous_token = state.m_previous_token;
-    m_line = state.m_line;
-    m_column = state.m_column;
-        
     /* Remove all states after this one */
     m_state_stack.resize(state_id);
   } 
@@ -190,22 +212,25 @@ private:
    * @brief Backs up the parser by one token
    */
   void backup() {
-    if (m_previous_token.m_type == Lexeme_type::undefined) [[unlikely]] {
+    auto &state = m_state_stack.back();
+
+    if (state.m_prev_lexeme.m_type == Lexeme_type::UNDEFINED) [[unlikely]] {
       throw std::runtime_error("Cannot backup: no previous token");
     }
 
-    assert(m_position >= m_current_token.m_value.length());
+    assert(state.m_pos <= m_lexer.m_input.size());
+    assert(state.m_pos >= state.m_lexeme.m_value.length());
 
     /* Restore position to start of current token */
-    m_position -= m_current_token.m_value.length();
-    m_line = m_current_token.m_line;
-    m_column = m_current_token.m_column;
+    state.m_pos -= state.m_lexeme.m_value.length();
+    state.m_line = state.m_lexeme.m_line;
+    state.m_col = state.m_lexeme.m_col;
 
     /* Restore current token to previous token */
-    m_current_token = m_previous_token;
+    state.m_lexeme = std::move(state.m_prev_lexeme);
 
     /* Reset previous token */
-    m_previous_token = Lexeme{};
+    state.m_prev_lexeme = Lexeme{};
   }
 
   /**
@@ -245,26 +270,27 @@ private:
     return Savepoint(*this);
   }
 
-  [[nodiscard]] std::unique_ptr<Ast_base> parse_statement();
+  [[nodiscard]] Ast_node parse_statement();
   [[nodiscard]] std::unique_ptr<Select_stmt> parse_select_statement();
   [[nodiscard]] std::unique_ptr<Insert_stmt> parse_insert_statement();
   [[nodiscard]] std::unique_ptr<Update_stmt> parse_update_statement();
   [[nodiscard]] std::unique_ptr<Delete_stmt> parse_delete_statement();
   [[nodiscard]] std::unique_ptr<Create_stmt> parse_create_statement();
+  [[nodiscard]] std::unique_ptr<Alter_table_stmt> parse_alter_table();
   [[nodiscard]] std::unique_ptr<Truncate_stmt> parse_truncate_statement();
   [[nodiscard]] std::unique_ptr<Merge_stmt> parse_merge_statement();
   [[nodiscard]] std::unique_ptr<Grant_revoke_stmt> parse_grant_revoke_statement();
   [[nodiscard]] std::vector<std::unique_ptr<Ast_base>> parse_column_list();
   [[nodiscard]] std::unique_ptr<Drop_stmt> parse_drop_statement();  
-  [[nodiscard]] std::unique_ptr<Alter_table_stmt> parse_alter_statement();
+  [[nodiscard]] std::unique_ptr<Alter_stmt> parse_alter_statement();
   [[nodiscard]] std::unique_ptr<Column_ref> parse_column_ref();
   [[nodiscard]] std::unique_ptr<Table_ref> parse_table_ref();
   [[nodiscard]] std::unique_ptr<Where_clause> parse_where_clause();
   [[nodiscard]] std::unique_ptr<Group_by> parse_group_by();
   [[nodiscard]] std::vector<std::unique_ptr<Order_by_item>> parse_order_by();
-  [[nodiscard]] std::unique_ptr<Binary_op> parse_expression();
-  [[nodiscard]] std::unique_ptr<Binary_op> parse_term();
-  [[nodiscard]] std::unique_ptr<Binary_op> parse_factor();
+  [[nodiscard]] std::unique_ptr<Ast_base> parse_expression();
+  [[nodiscard]] std::unique_ptr<Ast_base> parse_term();
+  [[nodiscard]] std::unique_ptr<Ast_base> parse_factor();
   [[nodiscard]] std::unique_ptr<Function_call> parse_function_call();
   [[nodiscard]] std::unique_ptr<Literal> parse_literal();
   [[nodiscard]] std::unique_ptr<Ast_base> parse_primary();
@@ -293,31 +319,24 @@ private:
   [[nodiscard]] Window_spec::Frame::Bound parse_frame_bound();
   [[nodiscard]] Foreign_key_reference::Action parse_reference_option();
   [[nodiscard]] std::unique_ptr<Foreign_key_reference> parse_foreign_key_reference();
+  [[nodiscard]] std::optional<Binary_op::Op_type> parse_operator();
+
   void parse_table_options(Create_table_def* table);
 
 private:
   struct State {
-    size_t m_position;
-    Lexeme m_current_token;
-    Lexeme m_previous_token;
-    size_t m_line;
-    size_t m_column;
+    size_t m_pos{};
+    Lexeme m_lexeme;
+    Lexeme m_prev_lexeme;
+    size_t m_line{1};
+    size_t m_col{1};
   };
 
-  /* State management */
+  Lexer& m_lexer;
   std::string_view m_input;
-  size_t m_position{0};
-  Lexeme m_current_token;
-  Lexeme m_previous_token;
-  size_t m_line{1};
-  size_t m_column{1};
-    
+
   /* Stack for backtracking */
   std::vector<State> m_state_stack;
-
-  Lexer& m_lexer;
-  Lexeme m_lexeme;
-  Lexeme m_previous_lexeme;
 };
 
 } // namespace sql

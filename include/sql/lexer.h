@@ -2,6 +2,7 @@
 
 #include <coroutine>
 #include <exception>
+#include <format>
 #include <cctype>
 #include <memory>
 #include <string>
@@ -13,22 +14,52 @@ namespace sql {
  * @brief Token types for SQL lexical analysis
  */
 enum class Lexeme_type {
-  undefined,
-  keyword,
-  identifier,
-  number,
-  string_literal,
-  operator_,
-  punctuation,
-  whitespace,
-  eof
+  UNDEFINED,
+  KEYWORD,
+  IDENTIFIER,
+  NUMBER,
+  STRING_LITERAL,
+  OPERATOR,
+  PUNCTUATION,
+  WHITESPACE,
+  END_OF_FILE
 };
 
+inline const char *to_string(Lexeme_type type) noexcept {
+  switch (type) {
+    case Lexeme_type::UNDEFINED:
+      return "UNDEFINED";
+    case Lexeme_type::KEYWORD:
+      return "KEYWORD";
+    case Lexeme_type::IDENTIFIER:
+      return "IDENTIFIER";
+    case Lexeme_type::NUMBER:
+      return "NUMBER";
+    case Lexeme_type::STRING_LITERAL:
+      return "STRING_LITERAL";
+    case Lexeme_type::OPERATOR:
+      return "OPERATOR";
+    case Lexeme_type::PUNCTUATION:
+      return "PUNCTUATION";
+    case Lexeme_type::WHITESPACE:
+      return "WHITESPACE";
+    case Lexeme_type::END_OF_FILE:
+      return "END_OF_FILE";
+  }
+  std::terminate();
+} 
+
 struct Lexeme {
-  Lexeme_type m_type{Lexeme_type::undefined};
+  std::string to_string() const noexcept {
+    return std::format(
+      "{{ m_type: {}, m_value: {}, m_line: {}, m_col: {} }}",
+      sql::to_string(m_type), m_value, m_line, m_col);
+  }
+
+  Lexeme_type m_type{Lexeme_type::UNDEFINED};
   std::string m_value{};
   size_t m_line{};
-  size_t m_column{};
+  size_t m_col{};
 };
 
 /**
@@ -129,7 +160,7 @@ inline auto Token::promise_type::yield_value(Token token) {
  * @brief SQL Lexer that uses coroutines for token generation
  */
 struct Lexer {
-  constexpr static auto Eof = Lexeme{Lexeme_type::eof, "", 0, 0};
+  constexpr static auto Eof = Lexeme{Lexeme_type::END_OF_FILE, "", 0, 0};
 
   /**
    * @brief Constructs a lexer with input text
@@ -142,9 +173,9 @@ struct Lexer {
     while (m_pos < m_input.size() && std::isspace(m_input[m_pos])) {
       if (m_input[m_pos] == '\n') [[unlikely]] {
         ++m_line;
-        m_column = 1;
+        m_col = 1;
       } else {
-        ++m_column;
+        ++m_col;
       }
       ++m_pos;
     }
@@ -167,7 +198,7 @@ struct Lexer {
         return '\0';
     } else {
       const char c = m_input[m_pos++];
-      ++m_column;
+      ++m_col;
       return c;
     }
   }
@@ -186,7 +217,7 @@ struct Lexer {
 
       char c = peek();
 
-      if (std::isalpha(c)) {
+      if (std::isalpha(c) || c == '_') {
         co_yield lex_identifier();
       } else if (std::isdigit(c)) {
         co_yield lex_number();
@@ -208,7 +239,7 @@ private:
 private:
   size_t m_pos{};
   size_t m_line{};
-  size_t m_column{};
+  size_t m_col{};
   std::string_view m_input{};
 
   friend struct Parser;

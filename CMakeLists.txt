@@ -38,7 +38,7 @@ add_link_options(
 add_library(sql_parser
   src/lexer.cc
   src/parser.cc
-  #src/ast.ccc
+  src/ast.cc
   #src/mysql_events.cc
   #src/mysql_procedures.cc
   #src/mysql_triggers.cc

@@ -11,17 +11,79 @@
 
 namespace sql {
 
+struct Join;
+struct Binary_op;
+struct Select_stmt;
+struct Using_clause;
+
 /**
  * @brief Base class for all AST nodes
  */
 struct Ast_base {
   virtual ~Ast_base() = default;
+  virtual std::string to_string() const noexcept = 0;
 };
+
+enum class Object_type {
+  table,
+  index,
+  view,
+  sequence,
+  trigger,
+  procedure,
+  function,
+  database
+};
+
+std::string to_string(Object_type type) noexcept;
+
+/**
+ * @brief Represents a column data type
+ */
+struct Data_type {
+  std::string to_string() const noexcept;
+
+  enum class Type {
+    integer,
+    bigint,
+    smallint,
+    decimal,
+    numeric,
+    float_,
+    double_,
+    char_,
+    varchar,
+    text,
+    date,
+    time,
+    timestamp,
+    boolean,
+    blob,
+    json
+  };
+
+  Type m_base_type;
+
+  /* For char/varchar */  
+  std::optional<size_t> m_length;
+
+  /* For decimal/numeric */
+  std::optional<size_t> m_precision;
+  std::optional<size_t> m_scale;
+
+  /* For character types */
+  std::optional<std::string> m_charset;
+  std::optional<std::string> m_collation;
+};
+
+std::string to_string(Data_type::Type type) noexcept;
 
 /**
  * @brief Represents literal values in SQL
  */
 struct Literal : Ast_base {
+  std::string to_string() const noexcept override;
+
   enum class Type {
     null,
     integer,
@@ -38,22 +100,68 @@ struct Literal : Ast_base {
  * @brief Column reference with optional table qualifier
  */
 struct Column_ref : Ast_base {
+  std::string to_string() const noexcept override;
+
   std::optional<std::string> m_table_name;
   std::string m_column_name;
   std::optional<std::string> m_alias;
 };
 
 /**
- * @brief Table reference with optional alias
+ * @brief Base class for table references
  */
 struct Table_ref : Ast_base {
-  std::optional<std::string> m_schema_name;
-  std::string m_table_name;
+  virtual std::string to_string() const noexcept override = 0;
+
   std::optional<std::string> m_alias;
 };
 
 /**
+ * @brief Simple table reference
+ */
+struct Base_table_ref : Table_ref {
+  std::string to_string() const noexcept override;
+
+  std::optional<std::string> m_schema_name;
+  std::string m_table_name;
+};
+
+/**
+ * @brief Subquery as a table reference
+ */
+struct Derived_table_ref : Table_ref {
+  std::string to_string() const noexcept override;
+
+  std::unique_ptr<Select_stmt> m_subquery;
+};
+
+/**
+ * @brief USING clause for joins
+ */
+struct Using_clause : Ast_base {
+  std::string to_string() const noexcept override;
+
+  std::vector<std::string> m_columns;
+};
+
+// FIXME: Get rid of this extra level of indirection in the grammar
+// Join_ref::Join{Join_ref::Join::m_left, Join_ref::Join::m_right}
+struct Join_ref : Table_ref {
+  std::string to_string() const noexcept override;
+
+  std::unique_ptr<Join> m_join;
+};
+
+/**
  * @brief Join types supported in FROM clause
+ * 
+ * Handle queries like:
+ * 
+ * SELECT * FROM t1, t2
+ * SELECT * FROM t1 JOIN t2 ON t1.id = t2.id
+ * SELECT * FROM t1 NATURAL JOIN t2
+ * SELECT * FROM t1 LEFT JOIN t2 USING (id)
+ * SELECT * FROM (SELECT * FROM t1) AS subq
  */
 enum class Join_type {
   inner,
@@ -63,21 +171,37 @@ enum class Join_type {
   cross
 };
 
+std::string to_string(Join_type type) noexcept;
+
 /**
  * @brief Represents a JOIN operation in FROM clause
  */
 struct Join : Ast_base {
+  std::string to_string() const noexcept override;
+
   Join_type m_type;
   std::unique_ptr<Table_ref> m_left;
   std::unique_ptr<Table_ref> m_right;
-  /* ON clause. */
-  std::unique_ptr<Ast_base> m_condition;
+  bool m_natural{false};
+  /* ON clause or USING columns */
+  std::variant<
+    /* ON condition */  
+    std::unique_ptr<Binary_op>,
+    /* USING clause */
+    std::unique_ptr<Using_clause>
+  > m_condition;
 };
+
 
 /**
  * @brief Binary operation (e.g., arithmetic, comparison)
  */
 struct Binary_op : Ast_base {
+  std::string to_string() const noexcept override;
+
+  /* Note: if you add a new operator here, don't forget to
+   * update Parser::parse_operator() in parser.cc. We can't
+   * use a switch there because we have to compare strings. */
   enum class Op_type {
     EQ,        // =
     NEQ,       // <>
@@ -93,13 +217,51 @@ struct Binary_op : Ast_base {
     AND,       // AND
     OR,        // OR
     LIKE,      // LIKE
-    IN         // IN
+    IN,        // IN
+    COMMA      // ,
   };
 
   Op_type m_op;
   std::unique_ptr<Ast_base> m_left;
   std::unique_ptr<Ast_base> m_right;
 };
+
+std::string to_string(Binary_op::Op_type op) noexcept;
+
+/**
+ * @brief Represents a foreign key reference
+ */
+struct Foreign_key_reference {
+  std::string to_string() const noexcept;
+
+  std::string m_table_name;
+  std::vector<std::string> m_column_names;
+    
+  enum class Match_type {
+    simple,
+    full,
+    partial
+  };
+
+  std::optional<Match_type> m_match;
+
+  enum class Action {
+    no_action,
+    restrict,
+    cascade,
+    set_null,
+    set_default
+  };
+
+  std::optional<Action> m_on_delete;
+  std::optional<Action> m_on_update;
+    
+  /* ENFORCED or NOT ENFORCED */
+  std::optional<bool> m_enforced;
+};
+
+std::string to_string(Foreign_key_reference::Match_type match) noexcept;
+std::string to_string(Foreign_key_reference::Action action) noexcept;
 
 /**
  * @brief Unary operation (e.g., NOT, EXISTS)
@@ -120,6 +282,8 @@ struct Unary_op : Ast_base {
  * @brief ORDER BY clause item
  */
 struct Order_by_item : Ast_base {
+  std::string to_string() const noexcept override;
+
   std::unique_ptr<Column_ref> m_column;
   bool m_ascending{true};
   /* NULLS FIRST/LAST */
@@ -130,6 +294,8 @@ struct Order_by_item : Ast_base {
  * @brief GROUP BY clause
  */
 struct Group_by : Ast_base {
+  std::string to_string() const noexcept override;
+
   std::vector<std::unique_ptr<Column_ref>> m_columns;
   std::unique_ptr<Ast_base> m_having;
 };
@@ -152,6 +318,8 @@ struct Case_expr : Ast_base {
  * @brief WHERE clause
  */
 struct Where_clause : Ast_base {
+  std::string to_string() const noexcept override;
+
   std::unique_ptr<Ast_base> m_condition;
 
   [[nodiscard]] bool has_value() const noexcept {
@@ -180,6 +348,8 @@ struct Cte : Ast_base {
  * @brief SELECT statement
  */
 struct Select_stmt : Ast_base {
+  std::string to_string() const noexcept override;
+
   bool m_distinct{false};
   /* Can be Column_ref or Function_call */
   std::vector<std::unique_ptr<Ast_base>> m_columns;
@@ -194,22 +364,32 @@ struct Select_stmt : Ast_base {
   std::vector<std::unique_ptr<Cte>> m_with;
 };
 
+struct Column_def : Ast_base {
+  std::string to_string() const noexcept override;
+
+  std::string m_name;
+  Data_type m_type;
+  bool m_nullable{true};
+  bool m_primary_key{false};
+  bool m_unique{false};
+  bool m_auto_increment{false};
+  std::unique_ptr<Ast_base> m_default_value;
+  std::unique_ptr<Ast_base> m_check;
+  std::unique_ptr<Foreign_key_reference> m_references;
+  std::optional<std::string> m_comment;
+  std::optional<std::string> m_collation;
+
+  /* Storage options */
+  /* STORED/VIRTUAL for generated columns */
+  std::optional<std::string> m_storage;
+  /* For generated columns */
+  std::unique_ptr<Ast_base> m_generation_expr;
+};
 
 /**
  * @brief CREATE TABLE statement
  */
 struct Create_table_stmt : Ast_base {
-  struct Column_def {
-    std::string m_name;
-    std::string m_type;
-    bool m_nullable{true};
-    std::unique_ptr<Ast_base> m_default_value;
-    bool m_primary_key{false};
-    bool m_unique{false};
-    /* Foreign key */
-    std::optional<std::string> m_references;
-  };
-
   std::string m_table_name;
   bool m_if_not_exists{false};
   std::vector<Column_def> m_columns;
@@ -228,27 +408,39 @@ enum class Alter_type {
   rename_table
 };
 
+std::string to_string(Alter_type type) noexcept;
+
 /**
  * @brief ALTER TABLE statement
  */
 struct Alter_table_stmt : Ast_base {
+  std::string to_string() const noexcept override;
+
   struct Add_column {
-    Create_table_stmt::Column_def m_column{};
+    std::string to_string() const noexcept;
+
+    Column_def m_column{};
     std::optional<std::string> m_after_column{};
     bool m_first{};
   };
 
   struct Modify_column {
+    std::string to_string() const noexcept;
+
     std::string m_column_name{};
-    Create_table_stmt::Column_def m_new_definition{};
+    Column_def m_new_definition{};
   };
 
   struct Rename_column {
+    std::string to_string() const noexcept;
+
     std::string m_old_name{};
     std::string m_new_name{};
   };
 
   struct Add_constraint {
+    std::string to_string() const noexcept;
+
     enum class Type {
       primary_key,
       foreign_key,
@@ -261,6 +453,8 @@ struct Alter_table_stmt : Ast_base {
     std::vector<std::string> m_columns{};
 
     struct Foreign_key_def {
+      std::string to_string() const noexcept;
+
       std::string m_table{};
       std::vector<std::string> m_columns{};
       std::string m_on_delete{};
@@ -279,16 +473,24 @@ struct Alter_table_stmt : Ast_base {
   Alter_type m_alter_type{};
 
   struct Drop_column {
+    std::string to_string() const noexcept;
+
+    bool m_cascade{};
     std::string m_column_name{};
   };
 
   struct Drop_constraint {
+    std::string to_string() const noexcept;
+
+    bool m_cascade{};
     std::string m_constraint{};
   };
 
   struct Rename_table {
+    std::string to_string() const noexcept;
+
     /** New table name. */
-   std::string m_name{};
+    std::string m_name{};
   };
 
   using Alteration = std::variant<
@@ -304,29 +506,23 @@ struct Alter_table_stmt : Ast_base {
   Alteration  m_alteration{std::in_place_type<Rename_table>, ""};
 
   /* If exists specified */
-  bool m_if_exists{false};
+  bool m_if_exists{};
 
   /* If all inheritance specified */
-  bool m_all_inheritance{false};
+  bool m_all_inheritance{};
 
   /* If only specified */
-  bool m_only{false}; 
+  bool m_only{}; 
 };
+
+std::string to_string(const Alter_table_stmt::Alteration& alteration) noexcept;
+std::string to_string(Alter_table_stmt::Add_constraint::Type type) noexcept;
 
 /**
  * @brief Base class for all ALTER statement types (more generic).
  */
 struct Alter_stmt : Ast_base {
-  enum class Object_type {
-    table,
-    index,
-    view,
-    sequence,
-    trigger,
-    procedure,
-    function,
-    database
-  };
+  std::string to_string() const noexcept override;
 
   Object_type m_object_type;
   bool m_if_exists{false};
@@ -370,15 +566,7 @@ struct Create_index_stmt : Ast_base {
  * @brief DROP statement (TABLE, INDEX, etc.)
  */
 struct Drop_stmt : Ast_base {
-  enum class Object_type {
-    table,
-    index,
-    view,
-    trigger,
-    procedure,
-    function,
-    database
-  };
+  std::string to_string() const noexcept override;
 
   bool m_cascade{false};
   bool m_if_exists{false};
@@ -414,6 +602,8 @@ struct Create_view_stmt : Ast_base {
  * @brief CREATE TRIGGER statement
  */
 struct Create_trigger_stmt : Ast_base {
+  // std::string to_string() const noexcept override;
+
   enum class Timing {
     before,
     after,
@@ -532,10 +722,15 @@ struct Grant_revoke_stmt : Ast_base {
   bool m_cascade{false};
 };
 
+std::string to_string(Grant_revoke_stmt::Object_type type) noexcept;
+std::string to_string(Grant_revoke_stmt::Privilege::Type type) noexcept;
+
 /**
  * @brief UPDATE statement
  */
 struct Update_stmt : Ast_base {
+  std::string to_string() const noexcept override;
+
   struct Assignment {
     std::string m_column;
     std::unique_ptr<Ast_base> m_value;
@@ -552,6 +747,8 @@ struct Update_stmt : Ast_base {
  * @brief INSERT statement
  */
 struct Insert_stmt : Ast_base {
+  std::string to_string() const noexcept override;
+
   std::string m_table_name;
   std::vector<std::string> m_columns;
 
@@ -571,6 +768,8 @@ struct Insert_stmt : Ast_base {
  * @brief DELETE statement
  */
 struct Delete_stmt : Ast_base {
+  std::string to_string() const noexcept override;
+
   std::unique_ptr<Table_ref> m_table;
   std::optional<std::vector<std::unique_ptr<Table_ref>>> m_using;
   std::unique_ptr<Where_clause> m_where;
@@ -589,80 +788,20 @@ struct Alter_action : Ast_base {
 };
 
 struct Add_column_action : Alter_action {
-  std::unique_ptr<Create_table_stmt::Column_def> m_column;
+  std::unique_ptr<Column_def> m_column;
   Column_position m_position{Column_position::default_};
   std::optional<std::string> m_after_column;
 };
 
-/**
- * @brief Represents a column data type
- */
-struct Data_type {
-  enum class Type {
-    integer,
-    bigint,
-    smallint,
-    decimal,
-    numeric,
-    float_,
-    double_,
-    char_,
-    varchar,
-    text,
-    date,
-    time,
-    timestamp,
-    boolean,
-    blob,
-    json
-  };
 
-  Type m_base_type;
 
-  /* For char/varchar */  
-  std::optional<size_t> m_length;
-
-  /* For decimal/numeric */
-  std::optional<size_t> m_precision;
-  std::optional<size_t> m_scale;
-
-  /* For character types */
-  std::optional<std::string> m_charset;
-  std::optional<std::string> m_collation;
-};
-
-/**
- * @brief Represents a foreign key reference
- */
-struct Foreign_key_reference {
-  std::string m_table_name;
-  std::vector<std::string> m_column_names;
-    
-  enum class Match_type {
-    simple,
-    full,
-    partial
-  };
-  std::optional<Match_type> m_match;
-
-  enum class Action {
-    no_action,
-    restrict,
-    cascade,
-    set_null,
-    set_default
-  };
-  std::optional<Action> m_on_delete;
-  std::optional<Action> m_on_update;
-    
-  /* ENFORCED or NOT ENFORCED */
-  std::optional<bool> m_enforced;
-};
 
 /**
  * @brief Represents a table constraint
  */
 struct Table_constraint : Ast_base {
+  std::string to_string() const noexcept override;
+
   enum class Type {
     primary_key,
     foreign_key,
@@ -691,6 +830,9 @@ struct Table_constraint : Ast_base {
   std::optional<Initially> m_initially;
 };
 
+std::string to_string(Table_constraint::Type type) noexcept;
+std::string to_string(Table_constraint::Initially initially) noexcept;
+
 /**
  * @brief Represents a table index
  */
@@ -713,30 +855,12 @@ struct Index_column {
 /**
  * @brief Represents a column definition
  */
-struct Column_def : Ast_base {
-  std::string m_name;
-  Data_type m_type;
-  bool m_nullable{true};
-  bool m_primary_key{false};
-  bool m_unique{false};
-  bool m_auto_increment{false};
-  std::unique_ptr<Ast_base> m_default_value;
-  std::unique_ptr<Ast_base> m_check;
-  std::unique_ptr<Foreign_key_reference> m_references;
-  std::optional<std::string> m_comment;
-  std::optional<std::string> m_collation;
-
-  /* Storage options */
-  /* STORED/VIRTUAL for generated columns */
-  std::optional<std::string> m_storage;
-  /* For generated columns */
-  std::unique_ptr<Ast_base> m_generation_expr;
-};
-
 /**
  * @brief Represents a CREATE TABLE definition
  */
 struct Create_table_def : Ast_base {
+  std::string to_string() const noexcept override;
+
   std::string m_table_name;
   std::vector<std::unique_ptr<Column_def>> m_columns;
   std::vector<std::unique_ptr<Table_constraint>> m_constraints;
@@ -761,6 +885,8 @@ struct Create_table_def : Ast_base {
 
   /* Partitioning options */
   struct Partition {
+    std::string to_string() const;
+
     enum class Type {
       range,
       list,
@@ -790,10 +916,14 @@ struct Create_table_def : Ast_base {
   } m_partition;
 };
 
+std::string to_string(Create_table_def::Partition::Type type) noexcept;
+
 /**
  * @brief Represents a CREATE INDEX definition
  */
 struct Create_index_def : Ast_base {
+  std::string to_string() const noexcept override;
+
   std::string m_index_name;
   std::string m_table_name;
   std::vector<Index_column> m_columns;
@@ -830,6 +960,8 @@ struct Create_index_def : Ast_base {
  * @brief Represents a CREATE VIEW definition
  */
 struct Create_view_def : Ast_base {
+  std::string to_string() const noexcept override;
+
   std::string m_view_name;
   std::vector<std::string> m_column_names;
   std::unique_ptr<Select_stmt> m_select;
@@ -859,6 +991,10 @@ struct Create_view_def : Ast_base {
   /* User who owns the view */
   std::optional<std::string> m_definer;
 };
+
+std::string to_string(Create_view_def::Algorithm algorithm) noexcept;
+std::string to_string(Create_view_def::Security security) noexcept;
+std::string to_string(Create_view_def::Check_option check_option) noexcept;
 
 /**
  * @brief Represents a CREATE SEQUENCE definition
@@ -1045,6 +1181,8 @@ struct Create_function_def : Stored_program {
  * @brief Base class for CREATE statement definitions
  */
 struct Create_stmt : Ast_base {
+  std::string to_string() const noexcept override;
+
   enum class Object_type {
     table,
     index,
@@ -1090,7 +1228,7 @@ struct Drop_constraint_action : Alter_action {
 };
 
 struct Modify_column_action : Alter_action {
-  std::unique_ptr<Create_table_stmt::Column_def> m_column;
+  std::unique_ptr<Column_def> m_column;
 };
 
 enum class Alter_column_type {
@@ -1119,11 +1257,15 @@ struct Rename_table_action : Alter_action {
  * @brief MERGE statement (UPSERT)
  */
 struct Merge_stmt : Ast_base {
+  // std::string to_string() const noexcept override;
+
   std::unique_ptr<Table_ref> m_target;
   std::unique_ptr<Table_ref> m_source;
   std::unique_ptr<Ast_base> m_condition;
 
   struct When_clause {
+    std::string to_string() const noexcept;
+
     enum class Match_type {
       matched,
       not_matched_target,
@@ -1146,7 +1288,11 @@ struct Merge_stmt : Ast_base {
   std::vector<When_clause> m_when_clauses;
 };
 
+std::string to_string(Merge_stmt::When_clause::Match_type type) noexcept;
+
 struct Window_spec : Ast_base {
+  std::string to_string() const noexcept override;
+
   /* Optional named window reference */
   std::optional<std::string> m_reference_name;
     
@@ -1161,6 +1307,8 @@ struct Window_spec : Ast_base {
     
   /* Frame clause */
   struct Frame {
+    std::string to_string() const noexcept;
+
     enum class Type {
       rows,
       range,
@@ -1168,6 +1316,8 @@ struct Window_spec : Ast_base {
     };
         
     struct Bound {
+      std::string to_string() const noexcept;
+
       enum class Type {
         current_row,
         unbounded_preceding,
@@ -1196,10 +1346,16 @@ struct Window_spec : Ast_base {
   std::unique_ptr<Frame> m_frame;
 };
 
+std::string to_string(Window_spec::Frame::Type type) noexcept;
+std::string to_string(Window_spec::Frame::Bound::Type type) noexcept;
+std::string to_string(Window_spec::Frame::Exclude exclude) noexcept;
+
 /**
  * @brief Function call with arguments, DISTINCT, COUNT(*), and window specification
  */
 struct Function_call : Ast_base {
+  std::string to_string() const noexcept override;
+
   std::string m_function_name;
   std::vector<std::unique_ptr<Ast_base>> m_arguments;
   bool m_distinct{false};
@@ -1208,20 +1364,20 @@ struct Function_call : Ast_base {
   std::unique_ptr<Window_spec> m_window;
 };
 
-  struct Column_reference {
-    std::optional<std::string> m_schema;
-    std::optional<std::string> m_table;
-    std::string m_column;
-    bool m_ascending{true};
-    enum class Nulls_position {
-      DEFAULT,
-      FIRST,
-      LAST
-    } m_nulls_position{Nulls_position::DEFAULT};
-    /* For index prefix lengths   */
-    std::optional<size_t> m_length;  
-    /* For collations */
-    std::optional<std::string> m_collation;
-  };
+struct Column_reference {
+  std::optional<std::string> m_schema;
+  std::optional<std::string> m_table;
+  std::string m_column;
+  bool m_ascending{true};
+  enum class Nulls_position {
+    DEFAULT,
+    FIRST,
+    LAST
+  } m_nulls_position{Nulls_position::DEFAULT};
+  /* For index prefix lengths   */
+  std::optional<size_t> m_length;  
+  /* For collations */
+  std::optional<std::string> m_collation;
+};
 
 } // namespace sql

@@ -74,7 +74,14 @@ private:
   void expect(Lexeme_type type) {
     const auto &state = m_state_stack.back();
     if (state.m_lexeme.m_type != type) [[unlikely]] {
-      throw std::runtime_error("Unexpected token type");
+      throw std::runtime_error(
+        std::format("Unexpected token type: expected token {}, got {}, previous token '{}', current token '{}, m_pos {}\n{}'",
+          sql::to_string(type),
+          sql::to_string(state.m_lexeme.m_type),
+          state.m_prev_lexeme.m_value,
+          state.m_lexeme.m_value,
+          state.m_pos,
+          m_lexer.m_input.substr(state.m_col)));
     }
     advance();
   }
@@ -97,6 +104,16 @@ private:
     }
   }
 
+  /**
+   * @brief Matches a token with a given type and value
+   * 
+   * If there is a match, the lexer advances to the next token
+   * 
+   * @param[in] type Token type
+   * @param[in] value Token value
+   * 
+   * @return True if the token matches, false otherwise
+   */
   [[nodiscard]] bool match(Lexeme_type type, const std::string& value) {
     const auto &state = m_state_stack.back();
     if (state.m_lexeme.m_type == type && state.m_lexeme.m_value == value) [[likely]] {
@@ -133,6 +150,11 @@ private:
     state.m_lexeme = saved_lexeme;
 
     return result;
+  }
+
+  [[nodiscard]] bool match_but_dont_advance(Lexeme_type type, const std::string& value) {
+    const auto state = m_state_stack.back();
+    return state.m_lexeme.m_type == type && state.m_lexeme.m_value == value;
   }
 
   [[nodiscard]] Lexeme peek() {
@@ -205,7 +227,7 @@ private:
     state.m_col = state.m_lexeme.m_col;
 
     /* Restore current token to previous token */
-    state.m_lexeme = state.m_prev_lexeme;
+    state.m_lexeme = std::move(state.m_prev_lexeme);
 
     /* Reset previous token */
     state.m_prev_lexeme = Lexeme{};
@@ -266,9 +288,9 @@ private:
   [[nodiscard]] std::unique_ptr<Where_clause> parse_where_clause();
   [[nodiscard]] std::unique_ptr<Group_by> parse_group_by();
   [[nodiscard]] std::vector<std::unique_ptr<Order_by_item>> parse_order_by();
-  [[nodiscard]] std::unique_ptr<Binary_op> parse_expression();
-  [[nodiscard]] std::unique_ptr<Binary_op> parse_term();
-  [[nodiscard]] std::unique_ptr<Binary_op> parse_factor();
+  [[nodiscard]] std::unique_ptr<Ast_base> parse_expression();
+  [[nodiscard]] std::unique_ptr<Ast_base> parse_term();
+  [[nodiscard]] std::unique_ptr<Ast_base> parse_factor();
   [[nodiscard]] std::unique_ptr<Function_call> parse_function_call();
   [[nodiscard]] std::unique_ptr<Literal> parse_literal();
   [[nodiscard]] std::unique_ptr<Ast_base> parse_primary();

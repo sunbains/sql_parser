@@ -41,8 +41,13 @@ TEST_F(Parser_test, ParsesJoins) {
   auto select = std::move(std::get<std::unique_ptr<Select_stmt>>(ast));
   ASSERT_NE(select, nullptr);
   
-  ASSERT_EQ(select->m_joins.size(), 1);
-  EXPECT_EQ(select->m_joins[0]->m_type, Join_type::inner);
+  const auto n_from = select->m_from.size();
+  ASSERT_EQ(n_from, 1);
+
+  const auto join_ref = dynamic_cast<Join_ref*>(select->m_from[0].get());
+  ASSERT_NE(join_ref, nullptr);
+
+  EXPECT_EQ(join_ref->m_join->m_type, Join_type::inner);
 }
 
 } // namespace sql::test

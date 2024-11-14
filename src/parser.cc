@@ -3,7 +3,7 @@
 namespace sql {
 
 std::optional<Binary_op::Op_type> Parser::parse_operator() {
-  auto &state = m_state_stack.back();
+  const auto &state = m_state_stack.back();
 
   if(state.m_lexeme.m_type != Lexeme_type::OPERATOR) [[likely]] {
     return std::nullopt;
@@ -35,15 +35,18 @@ std::optional<Binary_op::Op_type> Parser::parse_operator() {
     return Binary_op::Op_type::LIKE;
   } else if (state.m_lexeme.m_value == "IN") {
     return Binary_op::Op_type::IN;
+  } else if (state.m_lexeme.m_value == ",") {
+    return Binary_op::Op_type::COMMA;
   }
 
   return std::nullopt;
 }
 
-std::unique_ptr<Binary_op> Parser::parse_expression() {
+std::unique_ptr<Ast_base> Parser::parse_expression() {
   auto left = parse_term();
+  std::optional<Binary_op::Op_type> op_type;
 
-  while (auto op_type = parse_operator()) {
+  while ((op_type = parse_operator()) && op_type != Binary_op::Op_type::COMMA) {
     auto op = std::make_unique<Binary_op>();
 
     op->m_op = op_type.value();
@@ -57,17 +60,94 @@ std::unique_ptr<Binary_op> Parser::parse_expression() {
   return left;
 }
 
+std::unique_ptr<Table_ref> Parser::parse_table_reference() {
+  const auto &state = m_state_stack.back();
+
+  /* Check for subquery */
+  if (match(Lexeme_type::OPERATOR, "(")) {
+    if (peek().m_type == Lexeme_type::KEYWORD && peek().m_value == "SELECT") {
+      auto derived = std::make_unique<Derived_table_ref>();
+      advance(); // Skip the SELECT keyword
+      derived->m_subquery = parse_select_statement();
+      
+      if (!match(Lexeme_type::OPERATOR, ")")) {
+        throw std::runtime_error("Expected closing parenthesis after subquery");
+      }
+      
+      /* Handle optional alias */
+      if (match(Lexeme_type::KEYWORD, "AS")) {
+        if (state.m_lexeme.m_type != Lexeme_type::IDENTIFIER) {
+          throw std::runtime_error("Expected identifier after AS");
+        }
+        derived->m_alias = state.m_lexeme.m_value;
+        advance();
+      }
+      
+      return derived;
+    } else {
+      /* Put back the opening parenthesis */
+      backup();
+    }
+  }
+
+  /* Parse base table reference */
+  auto base = std::make_unique<Base_table_ref>();
+
+  /* Parse schema name if present */
+  if (state.m_lexeme.m_type == Lexeme_type::IDENTIFIER && peek().m_type == Lexeme_type::OPERATOR && peek().m_value == ".") {
+    base->m_schema_name = state.m_lexeme.m_value;
+    /* Skip schema name */
+    advance();
+    /* Skip dot */
+    advance();
+   }
+      /* Parse table name */
+   if (state.m_lexeme.m_type != Lexeme_type::IDENTIFIER) {
+    throw std::runtime_error("Expected table name at line " + 
+      std::to_string(state.m_lexeme.m_line) + 
+      ", column " + std::to_string(state.m_lexeme.m_col));
+  }
+
+  base->m_table_name = state.m_lexeme.m_value;
+  advance();
+ 
+  /* Parse optional alias */
+  if (match(Lexeme_type::KEYWORD, "AS")) {
+    if (state.m_lexeme.m_type != Lexeme_type::IDENTIFIER) {
+      throw std::runtime_error("Expected identifier after AS");
+    }
+    base->m_alias = state.m_lexeme.m_value;
+    advance();
+  } else if (state.m_lexeme.m_type == Lexeme_type::IDENTIFIER) {
+    /* Handle implicit alias */
+    base->m_alias = state.m_lexeme.m_value;
+    advance();
+   }
+ 
+  return base;
+ }
+
 std::vector<std::unique_ptr<Table_ref>> Parser::parse_table_references() {
-  std::vector<std::unique_ptr<Table_ref>> tables;
+  std::vector<std::unique_ptr<Table_ref>> refs;
 
   do {
-    auto table = parse_table_reference();
+    auto table_ref = parse_table_reference();
         
     /* Handle JOINs */
     for (;;) {
-      std::optional<Join_type> join_type;
+      bool natural{};
+      /* Parse NATURAL join modifier */
+      if (match(Lexeme_type::KEYWORD, "NATURAL")) {
+        natural = true;
+      }
+
+      std::optional<Join_type> join_type{};
             
-      if (match(Lexeme_type::KEYWORD, "INNER") || match(Lexeme_type::KEYWORD, "JOIN")) {
+      /* Parse join type */
+      if (match(Lexeme_type::KEYWORD, "INNER")) {
+        join_type = Join_type::inner;
+      } else if (match_but_dont_advance(Lexeme_type::KEYWORD, "JOIN")) {
+        /* Match but don't advance */
         join_type = Join_type::inner;
       } else if (match(Lexeme_type::KEYWORD, "LEFT")) {
         if (match(Lexeme_type::KEYWORD, "OUTER")) {
@@ -84,75 +164,82 @@ std::vector<std::unique_ptr<Table_ref>> Parser::parse_table_references() {
           (void) match(Lexeme_type::KEYWORD, "JOIN");
         }
         join_type = Join_type::full;
+      } else if (match(Lexeme_type::KEYWORD, "CROSS")) {
+        join_type = Join_type::cross;
       }
             
       if (!join_type) {
         break;
       }
 
+      /* JOIN keyword is required except after CROSS */
       if (!match(Lexeme_type::KEYWORD, "JOIN")) {
-        throw std::runtime_error("Expected JOIN keyword");
+        if (join_type != Join_type::cross) {
+          throw std::runtime_error("Expected JOIN keyword");
+        }
       }
 
+      auto join_ref = std::make_unique<Join_ref>();
+      
+      /* Set up the underlying join */
       auto join = std::make_unique<Join>();
+
       join->m_type = *join_type;
-      join->m_left = std::move(table);
-      join->m_right = parse_table_reference();
- 
-      /* Parse join condition */
-      if (!match(Lexeme_type::KEYWORD, "ON")) {
-        throw std::runtime_error("Expected ON after JOIN");
+      join->m_natural = natural;
+      join->m_left = std::move(table_ref);
+      
+      /* Parse right side of join */
+      join->m_right = parse_table_reference(); 
+
+      /* Parse join condition unless NATURAL or CROSS join */
+      if (!natural && join_type != Join_type::cross) {
+        if (match(Lexeme_type::KEYWORD, "ON")) {
+          /* ON condition */
+          auto condition = parse_expression();
+          auto binary_condition = std::unique_ptr<Binary_op>(static_cast<Binary_op*>(condition.release()));
+
+          join->m_condition = std::move(binary_condition);
+
+        } else if (match(Lexeme_type::KEYWORD, "USING")) {
+          /* USING (columns) */
+          if (!match(Lexeme_type::OPERATOR, "(")) {
+            throw std::runtime_error("Expected opening parenthesis after USING");
+          }
+
+          auto using_list = std::make_unique<Using_clause>();
+          
+          do {
+            if (m_state_stack.back().m_lexeme.m_type != Lexeme_type::IDENTIFIER) {
+              throw std::runtime_error("Expected column name in USING clause");
+            }
+            using_list->m_columns.push_back(m_state_stack.back().m_lexeme.m_value);
+            advance();
+          } while (match(Lexeme_type::OPERATOR, ","));
+
+          if (!match(Lexeme_type::OPERATOR, ")")) {
+            throw std::runtime_error("Expected closing parenthesis after USING columns");
+          }
+
+          join->m_condition = std::move(using_list);
+
+        } else {
+          throw std::runtime_error("Expected ON or USING clause after JOIN");
+        }
       }
-      join->m_condition = parse_expression();
-
-      throw std::runtime_error("JOINs are not supported");
+      
+      /* Move the join into the join_ref */
+      join_ref->m_join = std::move(join);
+      
+      /* For next iteration, this join becomes the current table reference */
+      table_ref = std::move(join_ref);
     }
+    
+    refs.push_back(std::move(table_ref));
 
-    tables.push_back(std::move(table));
   } while (match(Lexeme_type::OPERATOR, ","));
 
-  return tables;
-}
 
-std::unique_ptr<Table_ref> Parser::parse_table_reference() {
-  auto table = std::make_unique<Table_ref>();
-  const auto &state = m_state_stack.back();
-
-  /* Parse schema name if present */
-  if (state.m_lexeme.m_type == Lexeme_type::IDENTIFIER && peek().m_type == Lexeme_type::OPERATOR && peek().m_value == ".") {
-    table->m_schema_name = state.m_lexeme.m_value;
-
-    /* Skip schema name */
-    advance();
-
-    /* Skip the dot. */
-    advance();
-  }
-
-  /* Parse table name */
-  if (state.m_lexeme.m_type != Lexeme_type::IDENTIFIER) {
-    throw std::runtime_error("Expected table name");
-  }
-
-  table->m_table_name = state.m_lexeme.m_value;
-  advance();
-
-  /* Parse optional alias */
-  if (match(Lexeme_type::KEYWORD, "AS")) {
-    if (state.m_lexeme.m_type != Lexeme_type::IDENTIFIER) {
-      throw std::runtime_error("Expected identifier after AS");
-    }
-
-    table->m_alias = state.m_lexeme.m_value;
-    advance();
-
-  } else if (state.m_lexeme.m_type == Lexeme_type::IDENTIFIER) {
-    /* Handle implicit alias */
-    table->m_alias = state.m_lexeme.m_value;
-    advance();
-  }
-
-  return table;
+  return refs;
 }
 
 std::unique_ptr<Where_clause> Parser::parse_where_clause() {
@@ -172,8 +259,15 @@ std::unique_ptr<Column_ref> Parser::parse_column_ref() {
 
     if (match(Lexeme_type::OPERATOR, ".")) {
         col->m_table_name = std::move(col->m_column_name);
-        expect(Lexeme_type::IDENTIFIER);
-        col->m_column_name = state.m_prev_lexeme.m_value;
+
+        if (state.m_lexeme.m_type == Lexeme_type::OPERATOR && state.m_lexeme.m_value == "*") {
+          // TODO Read all the columns from the table
+          col->m_column_name = state.m_lexeme.m_value;
+          advance();
+        } else {
+          expect(Lexeme_type::IDENTIFIER);
+          col->m_column_name = state.m_prev_lexeme.m_value;
+        }
     }
 
     return col;
@@ -781,6 +875,7 @@ std::unique_ptr<Create_index_def> Parser::parse_create_index() {
 std::unique_ptr<Create_view_def> Parser::parse_create_view() {
   auto view = std::make_unique<Create_view_def>();
   const auto &state = m_state_stack.back();
+
   /* Parse optional OR REPLACE */
   if (match(Lexeme_type::KEYWORD, "OR")) {
     if (!match(Lexeme_type::KEYWORD, "REPLACE")) {
@@ -1368,7 +1463,6 @@ Foreign_key_reference::Action Parser::parse_reference_option() {
 
 std::unique_ptr<Ast_base> Parser::parse_column_expression() {
   std::unique_ptr<Ast_base> expr;
-
   const auto &state = m_state_stack.back();
 
   /* Check for function call */
@@ -1488,6 +1582,7 @@ std::unique_ptr<Alter_table_stmt> Parser::parse_alter_table() {
 std::unique_ptr<Literal> Parser::parse_literal() {
   auto literal = std::make_unique<Literal>();
   const auto &state = m_state_stack.back();
+
   switch (state.m_lexeme.m_type) {
     case Lexeme_type::NUMBER:
       /* Determine if it's integer or floating point */
@@ -1552,12 +1647,14 @@ std::unique_ptr<Ast_base> Parser::parse_primary() {
   return parse_literal();
 }
 
-std::unique_ptr<Binary_op> Parser::parse_factor() {
+std::unique_ptr<Ast_base> Parser::parse_factor() {
   auto left = parse_primary();
+  std::optional<Binary_op::Op_type> op_type;
 
-  while (auto op_type = parse_operator()) {
+  while ((op_type = parse_operator()) && op_type != Binary_op::Op_type::COMMA) {
     auto op = std::make_unique<Binary_op>();
     op->m_op = op_type.value();
+
     advance();
 
     op->m_left = std::move(left);
@@ -1565,13 +1662,19 @@ std::unique_ptr<Binary_op> Parser::parse_factor() {
     left = std::move(op);
   }
 
-  return std::unique_ptr<Binary_op>(dynamic_cast<Binary_op*>(left.release()));
+  if (op_type && *op_type != Binary_op::Op_type::COMMA) {
+    return std::unique_ptr<Binary_op>(static_cast<Binary_op*>(left.release()));
+  } else {
+    return left;
+  }
 }
 
-std::unique_ptr<Binary_op> Parser::parse_term() {
+std::unique_ptr<Ast_base> Parser::parse_term() {
   auto left = parse_factor();
+  std::optional<Binary_op::Op_type> op_type;
 
-  while (auto op_type = parse_operator()) {
+  while ((op_type = parse_operator()) && op_type != Binary_op::Op_type::COMMA) {
+
     auto op = std::make_unique<Binary_op>();
 
     op->m_op = op_type.value();
@@ -1712,13 +1815,13 @@ std::unique_ptr<Drop_stmt> Parser::parse_drop_statement() {
 
   /* Parse object type */
   if (match(Lexeme_type::KEYWORD, "TABLE")) {
-    drop->m_object_type = Drop_stmt::Object_type::table;
+    drop->m_object_type = Object_type::table;
   } else if (match(Lexeme_type::KEYWORD, "INDEX")) {
-    drop->m_object_type = Drop_stmt::Object_type::index;
+    drop->m_object_type = Object_type::index;
   } else if (match(Lexeme_type::KEYWORD, "VIEW")) {
-    drop->m_object_type = Drop_stmt::Object_type::view;
+    drop->m_object_type = Object_type::view;
   } else if (match(Lexeme_type::KEYWORD, "TRIGGER")) {
-    drop->m_object_type = Drop_stmt::Object_type::trigger;
+    drop->m_object_type = Object_type::trigger;
   } else if (match(Lexeme_type::KEYWORD, "SEQUENCE")) {
     // TODO: Implement DROP SEQUENCE
     throw std::runtime_error("DROP SEQUENCE not implemented");

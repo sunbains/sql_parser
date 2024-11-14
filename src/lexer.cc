@@ -23,11 +23,10 @@ Token Lexer::lex_identifier() {
 
   // TODO: Add more keywords
   static const std::unordered_set<std::string> keywords = {
-    "SELECT", "FROM", "WHERE", "GROUP", "BY", "HAVING", "ORDER", "LIMIT", "INSERT", "UPDATE", "DELETE", "AND",
-    "OR", "NOT", "NULL", "TRUE", "FALSE", "AS", "ON", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "OUTER",
-    "JOIN", "ON", "USING", "DISTINCT", "ORDER", "BY", "ASC", "DESC", "OFFSET", "FETCH", "NEXT",
-    "FIRST", "LAST", "ONLY", "WITH", "RECURSIVE", "WITHOUT", "ROW", "ROWS", "SET", "HAVING", "LIKE", "GROUP",
-    "NATURAL"
+    "AND", "ASC", "BY", "CROSS", "DELETE", "DESC", "DISTINCT", "FALSE", "FETCH", "FIRST", "FROM", "FULL",
+    "GROUP", "HAVING", "INNER", "INSERT", "JOIN", "LAST", "LEFT", "LIKE", "LIMIT", "NATURAL", "NEXT", "NOT",
+    "NULL", "OFFSET", "ON", "ONLY", "OR", "ORDER", "OUTER", "RECURSIVE", "RIGHT", "ROW", "ROWS", "SELECT",
+    "SET", "TRUE", "UPDATE", "USING", "WHERE", "WITH", "WITHOUT"
   };
 
   std::string ucase{value};
